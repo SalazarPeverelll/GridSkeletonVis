@@ -887,8 +887,8 @@ class OriginDVITrainer(SingleVisTrainer):
             json.dump(evaluation, f)
 
 class DVIALMODITrainer(SingleVisTrainer):
-    def __init__(self, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE):
-        super().__init__(model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE)
+    def __init__(self, grid_high_mask, high_bom, iteration, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE):
+        super().__init__(grid_high_mask, high_bom, iteration, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE)
         self.is_first_active_learning = True  # Add this line
         
 
@@ -897,6 +897,16 @@ class DVIALMODITrainer(SingleVisTrainer):
         # This method calculates the loss of each sample in the dataset.
         # It returns a list of losses and updates the edge loader with the inverse of these losses as weights.
         losses = []
+        
+        grid_pred = self.data_provider.get_pred(self.iteration, self.grid_high_mask).argmax(axis=1)
+        grid_second_emd_mask = self.projector.batch_project(self.iteration, self.grid_high_mask)
+        grid_second_high_mask = self.projector.batch_inverse(self.iteration, grid_second_emd_mask)
+        grid_second_pred = self.data_provider.get_pred(self.iteration, grid_second_high_mask).argmax(axis=1)
+
+        error_indices = [i for i in range(len(grid_pred)) if grid_pred[i] != grid_second_pred[i]]
+        grid_high_error = [self.grid_high_mask[i] for i in error_indices]
+
+        
         # Ensure the model is in evaluation mode
         self.model.eval()
         with torch.no_grad():

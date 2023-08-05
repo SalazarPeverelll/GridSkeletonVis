@@ -23,6 +23,8 @@ from singleVis.spatial_edge_constructor import SingleEpochSpatialEdgeConstructor
 from singleVis.projector import DVIProjector
 from singleVis.eval.evaluator import Evaluator
 from singleVis.utils import find_neighbor_preserving_rate
+from singleVis.visualizer import visualizer
+from trustVis.skeleton_generator import CenterSkeletonGenerator
 ########################################################################################################################
 #                                                     DVI PARAMETERS                                                   #
 ########################################################################################################################
@@ -121,6 +123,29 @@ for iteration in range(EPOCH_START, EPOCH_END+EPOCH_PERIOD, EPOCH_PERIOD):
         npr = find_neighbor_preserving_rate(prev_data, curr_data, N_NEIGHBORS)
         temporal_loss_fn = TemporalLoss(w_prev, DEVICE)
         criterion = DVILoss(umap_loss_fn, recon_loss_fn, temporal_loss_fn, lambd1=LAMBDA1, lambd2=torch.from_numpy(LAMBDA2*npr), device=DEVICE)
+    
+    vis = visualizer(data_provider, projector, 200, "tab10")
+    grid_high, grid_emd ,border = vis.get_epoch_decision_view(iteration,400,None, True)
+    train_data_embedding = projector.batch_project(iteration, data_provider.train_representation(iteration))
+    from sklearn.neighbors import NearestNeighbors
+    import numpy as np
+
+    # 假设 train_data_embedding 和 grid_emd 都是 numpy arrays，每一行都是一个点
+    threshold = 2  # 设置你的阈值
+
+    # 使用 train_data_embedding 初始化 NearestNeighbors 对象
+    nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(train_data_embedding)
+    # 对于 grid_emd 中的每一个点，找到 train_data_embedding 中离它最近的点
+    distances, indices = nbrs.kneighbors(grid_emd)
+    # 找到距离小于阈值的索引
+    mask = distances.ravel() < threshold
+    selected_indices = np.arange(grid_emd.shape[0])[mask]
+
+    grid_high_mask = grid_high[selected_indices]
+
+    skeleton_generator = CenterSkeletonGenerator(data_provider,iteration,3,3,1000)
+    high_bom = skeleton_generator.center_skeleton_genertaion()
+       
     # Define training parameters
     optimizer = torch.optim.Adam(model.parameters(), lr=.01, weight_decay=1e-5)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=.1)
@@ -150,8 +175,8 @@ for iteration in range(EPOCH_START, EPOCH_END+EPOCH_PERIOD, EPOCH_PERIOD):
     #                                                       TRAIN                                                          #
     ########################################################################################################################
 
-    trainer = OriginDVITrainer(model, criterion, optimizer, lr_scheduler, edge_loader=edge_loader, DEVICE=DEVICE)
-    # trainer = DVIALMODITrainer(model, criterion, optimizer, lr_scheduler, edge_loader=edge_loader, DEVICE=DEVICE)
+    # trainer = OriginDVITrainer(model, criterion, optimizer, lr_scheduler, edge_loader=edge_loader, DEVICE=DEVICE)
+    trainer = DVIALMODITrainer(grid_high_mask, high_bom, iteration, model, criterion, optimizer, lr_scheduler, edge_loader=edge_loader, DEVICE=DEVICE)
 
     t2=time.time()
     trainer.train(PATIENT, MAX_EPOCH)
@@ -170,7 +195,7 @@ for iteration in range(EPOCH_START, EPOCH_END+EPOCH_PERIOD, EPOCH_PERIOD):
     for param in prev_model.parameters():
         param.requires_grad = False
     w_prev = dict(prev_model.named_parameters())
-    
+
 
 ########################################################################################################################
 #                                                      VISUALIZATION                                                   #
