@@ -86,7 +86,21 @@ class UmapLoss(nn.Module):
 #         # without attention weights
 #         # loss1 = torch.mean(torch.mean(torch.pow(edge_to - recon_to, 2), 1))
 #         # loss2 = torch.mean(torch.mean(torch.pow(edge_from - recon_from, 2), 1))
-#         return (loss1 + loss2)/2
+#         loss3 = self.cosine_similarity(edge_to, recon_to, a_to)
+#         loss4 = self.cosine_similarity(edge_from, recon_from, a_from)
+#         return (loss1 + loss2 + loss3 + loss4)/4
+
+#     def cosine_similarity(self, x, y, a):
+#         x_normalized = torch.nn.functional.normalize(x, dim=1)
+#         y_normalized = torch.nn.functional.normalize(y, dim=1)
+#         similarity = torch.nn.functional.cosine_similarity(x_normalized, y_normalized, dim=1)
+
+#         # # Adjust the shape of a to match similarity
+#         # similarity = similarity.unsqueeze(1).expand_as(a)
+
+#         # weighted_similarity = torch.pow((1 + a), self._beta) * similarity
+#         similarity = torch.mean(similarity)
+#         return 1 - similarity
 
 # class ReconstructionLoss(nn.Module):
 #     def __init__(self, beta=1.0, weight_loss1=0.5, weight_loss2=0.5, clip_val=None):
@@ -208,7 +222,7 @@ class TemporalLoss(nn.Module):
             # loss = loss + torch.norm(curr_param-prev_param, 2)
         # in dvi paper, they dont have this normalization (optional)
         # loss = loss/c
-        return loss
+        return loss.mean()
 
 
 class DummyTemporalLoss(nn.Module):
@@ -230,7 +244,17 @@ class PositionRecoverLoss(nn.Module):
         loss = mse_loss(position, recover_position)
         return loss
 
+class GraphStructureLoss(nn.Module):
+    def __init__(self, device) -> None:
+        super(GraphStructureLoss, self).__init__()
+        self.device = device
 
+    def forward(self, edge_to, edge_from):
+        # 计算图结构保持损失函数的逻辑
+        loss = torch.mean(torch.abs(edge_to - edge_from))
+        loss = torch.tensor(loss, dtype=torch.float32).to(self.device)
+        return loss
+    
 class DVILoss(nn.Module):
     def __init__(self, umap_loss, recon_loss, temporal_loss, lambd1, lambd2, device):
         super(DVILoss, self).__init__()
@@ -249,8 +273,37 @@ class DVILoss(nn.Module):
         recon_l = self.recon_loss(edge_to, edge_from, recon_to, recon_from, a_to, a_from).to(self.device)
         umap_l = self.umap_loss(embedding_to, embedding_from).to(self.device)
         temporal_l = self.temporal_loss(curr_model).to(self.device)
+        if isinstance(self.lambd2, torch.Tensor):
+            self.lambd2 = self.lambd2.to(self.device)
 
         loss = umap_l + self.lambd1 * recon_l + self.lambd2 * temporal_l
+
+        return umap_l, self.lambd1 *recon_l, self.lambd2 *temporal_l, loss
+
+class NewDVILoss(nn.Module):
+    def __init__(self, umap_loss, recon_loss, temporal_loss, lambd1, lambd2, device):
+        super(DVILoss, self).__init__()
+        self.umap_loss = umap_loss
+        self.recon_loss = recon_loss
+        self.temporal_loss = temporal_loss
+        self.lambd1 = lambd1
+        self.lambd2 = lambd2
+        self.device = device
+
+    def forward(self, edge_to, edge_from, a_to, a_from, curr_model, outputs):
+        embedding_to, embedding_from = outputs["umap"]
+        recon_to, recon_from = outputs["recon"]
+        # TODO stop gradient edge_to_ng = edge_to.detach().clone()
+
+        recon_l = self.recon_loss(edge_to, edge_from, recon_to, recon_from, a_to, a_from).to(self.device)
+        umap_l = self.umap_loss(embedding_to, embedding_from).to(self.device)
+        temporal_l = self.temporal_loss(curr_model).to(self.device)
+        if isinstance(self.lambd2, torch.Tensor):
+            self.lambd2 = self.lambd2.to(self.device)
+
+        graph_loss = self.graph_loss(weight=0.2).to(self.device)
+
+        loss = umap_l + self.lambd1 * recon_l + self.lambd2 * temporal_l + graph_loss
 
         return umap_l, self.lambd1 *recon_l, self.lambd2 *temporal_l, loss
 

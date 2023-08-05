@@ -8,6 +8,8 @@ import torch
 from singleVis.losses import PositionRecoverLoss
 from torch.utils.data import DataLoader, WeightedRandomSampler
 import copy
+import numpy as np
+from singleVis.custom_weighted_random_sampler import CustomWeightedRandomSampler
 
 torch.manual_seed(0)  # 使用固定的种子
 torch.cuda.manual_seed_all(0)
@@ -831,6 +833,222 @@ class DVIReFineTrainer(SingleVisTrainer):
                                                                 sum(all_loss) / len(all_loss), sum(recoverposition_losses) / len(all_loss)))
         return self.loss
    
+    def record_time(self, save_dir, file_name, operation, iteration, t):
+        # save result
+        save_file = os.path.join(save_dir, file_name+".json")
+        if not os.path.exists(save_file):
+            evaluation = dict()
+        else:
+            f = open(save_file, "r")
+            evaluation = json.load(f)
+            f.close()
+        if operation not in evaluation.keys():
+            evaluation[operation] = dict()
+        evaluation[operation][iteration] = round(t, 3)
+        with open(save_file, 'w') as f:
+            json.dump(evaluation, f)
+
+class OriginDVITrainer(SingleVisTrainer):
+    def __init__(self, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE):
+        super().__init__(model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE)
+    
+    def train_step(self):
+        self.model = self.model.to(device=self.DEVICE)
+        self.model.train()
+        all_loss = []
+        umap_losses = []
+        recon_losses = []
+        temporal_losses = []
+
+        t = tqdm(self.edge_loader, leave=True, total=len(self.edge_loader))
+        
+        for data in t:
+            edge_to, edge_from, a_to, a_from = data
+
+            edge_to = edge_to.to(device=self.DEVICE, dtype=torch.float32)
+            edge_from = edge_from.to(device=self.DEVICE, dtype=torch.float32)
+            a_to = a_to.to(device=self.DEVICE, dtype=torch.float32)
+            a_from = a_from.to(device=self.DEVICE, dtype=torch.float32)
+
+            outputs = self.model(edge_to, edge_from)
+            umap_l, recon_l, temporal_l, loss = self.criterion(edge_to, edge_from, a_to, a_from, self.model, outputs)
+            all_loss.append(loss.mean().item())
+            umap_losses.append(umap_l.item())
+            recon_losses.append(recon_l.item())
+            temporal_losses.append(temporal_l.mean().item())
+            # ===================backward====================
+            self.optimizer.zero_grad()
+            loss.mean().backward()
+            self.optimizer.step()
+        self._loss = sum(all_loss) / len(all_loss)
+        self.model.eval()
+        print('umap:{:.4f}\trecon_l:{:.4f}\ttemporal_l:{:.4f}\tloss:{:.4f}'.format(sum(umap_losses) / len(umap_losses),
+                                                                sum(recon_losses) / len(recon_losses),
+                                                                sum(temporal_losses) / len(temporal_losses),
+                                                                sum(all_loss) / len(all_loss)))
+        return self.loss
+    
+    def record_time(self, save_dir, file_name, operation, iteration, t):
+        # save result
+        save_file = os.path.join(save_dir, file_name+".json")
+        if not os.path.exists(save_file):
+            evaluation = dict()
+        else:
+            f = open(save_file, "r")
+            evaluation = json.load(f)
+            f.close()
+        if operation not in evaluation.keys():
+            evaluation[operation] = dict()
+        evaluation[operation][iteration] = round(t, 3)
+        with open(save_file, 'w') as f:
+            json.dump(evaluation, f)
+
+class DVIALMODITrainer(SingleVisTrainer):
+    def __init__(self, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE):
+        super().__init__(model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE)
+        self.is_first_active_learning = True  # Add this line
+        
+
+    def evaluate_loss(self, current_loader):
+        print("evluating")
+        # This method calculates the loss of each sample in the dataset.
+        # It returns a list of losses and updates the edge loader with the inverse of these losses as weights.
+        losses = []
+        # Ensure the model is in evaluation mode
+        self.model.eval()
+        with torch.no_grad():
+            for data in current_loader:
+                edge_to, edge_from, a_to, a_from = data
+                edge_to = edge_to.to(device=self.DEVICE, dtype=torch.float32)
+                edge_from = edge_from.to(device=self.DEVICE, dtype=torch.float32)
+                a_to = a_to.to(device=self.DEVICE, dtype=torch.float32)
+                a_from = a_from.to(device=self.DEVICE, dtype=torch.float32)
+                outputs = self.model(edge_to, edge_from)
+                _, _,_, loss = self.criterion(edge_to, edge_from, a_to, a_from, self.model, outputs)
+                losses.append(loss.mean().item())
+        # We use the inverse of the loss as the weight, so the samples with higher loss will have higher chance to be selected.
+        # weights = 1.0 / torch.tensor(losses, dtype=torch.float32)
+        weights = torch.tensor(losses, dtype=torch.float32)
+        # Normalize the weights so they sum to 1
+        weights = weights / weights.sum()
+
+        # eliminate_zeros = weights>5e-2    #1e-3
+        # edge_to = edge_to[eliminate_zeros]
+        # edge_from = edge_from[eliminate_zeros]
+        # weights = weights[eliminate_zeros]
+        # Update the edge loader
+        # n_samples = int(np.sum(5 * weights) // 1)
+        # chose sampler based on the number of dataset
+        if len(edge_to) > pow(2,24):
+            sampler = CustomWeightedRandomSampler(weights, len(current_loader.dataset), replacement=True)
+        else:
+            sampler = WeightedRandomSampler(weights, len(current_loader.dataset), replacement=True)
+        new_loader = DataLoader(current_loader.dataset, batch_size=2000, sampler=sampler, num_workers=8, prefetch_factor=10)
+        # new_loader = ActiveLearningEdgeLoader(current_loader.dataset, weights, batch_size=current_loader.batch_size)
+        return losses, new_loader
+    
+    def train_step(self, edge_loader):
+        self.model = self.model.to(device=self.DEVICE)
+
+        self.model.train()
+        all_loss = []
+        umap_losses = []
+        recon_losses = []
+        temporal_losses = []
+
+
+        t = tqdm(edge_loader, leave=True, total=len(edge_loader))
+        
+        for data in t:
+            edge_to, edge_from, a_to, a_from = data
+
+            edge_to = edge_to.to(device=self.DEVICE, dtype=torch.float32)
+            edge_from = edge_from.to(device=self.DEVICE, dtype=torch.float32)
+            a_to = a_to.to(device=self.DEVICE, dtype=torch.float32)
+            a_from = a_from.to(device=self.DEVICE, dtype=torch.float32)
+
+            outputs = self.model(edge_to, edge_from)
+            umap_l, recon_l, temporal_l, loss = self.criterion(edge_to, edge_from, a_to, a_from, self.model, outputs)
+     
+              
+            all_loss.append(loss.mean().item())
+            umap_losses.append(umap_l.item())
+            recon_losses.append(recon_l.item())
+            temporal_losses.append(temporal_l.mean().item())
+
+            # ===================backward====================
+            self.optimizer.zero_grad()
+            loss.mean().backward()
+            self.optimizer.step()
+        self._loss = sum(all_loss) / len(all_loss)
+        self.model.eval()
+        print('umap:{:.4f}\trecon_l:{:.4f}\ttemporal_l:{:.4f}\tloss:{:.4f}'.format(sum(umap_losses) / len(umap_losses),
+                                                                sum(recon_losses) / len(recon_losses),
+                                                                sum(temporal_losses) / len(temporal_losses),
+                                                                sum(all_loss) / len(all_loss)))
+        return self.loss
+    
+    def run_epoch(self, epoch, current_loader, is_active_learning=False, is_full_data=False):
+        print("====================\nepoch:{}\n===================".format(epoch+1))
+        start_time = time.time()
+
+        if is_active_learning and is_full_data == False:
+            _, current_loader = self.evaluate_loss(current_loader)
+            # Adjust learning rate for active learning
+            if self.is_first_active_learning:
+                print("change learning rate")
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] *= 0.1  # or set to any value you want
+                self.is_first_active_learning = False
+            
+        prev_loss = self.loss
+
+        if is_full_data:
+            print("full data")
+            loss = self.train_step(self.edge_loader)  # use DVITrainer's train_step
+        else:
+            loss = self.train_step(current_loader)  # use DVITrainer's train_step
+        
+        self.lr_scheduler.step()
+
+        elapsed_time = time.time() - start_time
+        print("Epoch completed in: {:.2f} seconds".format(elapsed_time))
+
+        return prev_loss, loss, current_loader
+    
+    def train(self, PATIENT, MAX_EPOCH_NUMS):
+        start_flag = 1
+        if start_flag:
+            current_loader = self.edge_loader
+            start_flag = 0
+        print("ininin in dvi")
+        patient = PATIENT
+        time_start = time.time()
+        # Pretraining
+        for epoch in range(10):
+            print("Pretraining")
+            _, _, current_loader= self.run_epoch(epoch, current_loader, is_active_learning=False,is_full_data=True)
+
+
+        for epoch in range(MAX_EPOCH_NUMS):
+            print("In active learning")
+            # is_full_data = (epoch % 3 == 0)  # retrain with full data every RE_TRAINING_INTERVAL epochs
+            prev_loss, loss, current_loader = self.run_epoch(epoch, current_loader, is_active_learning=True, is_full_data=False)
+      
+            # Early stop, check whether converge or not
+            if abs(prev_loss - loss) < 5E-3:
+                if patient == 0:
+                    break
+                else:
+                    patient -= 1
+            else:
+                patient = PATIENT
+
+        time_end = time.time()
+        time_spend = time_end - time_start
+        print("Time spend: {:.2f} for training vis model...".format(time_spend))   
+        
+    
     def record_time(self, save_dir, file_name, operation, iteration, t):
         # save result
         save_file = os.path.join(save_dir, file_name+".json")
