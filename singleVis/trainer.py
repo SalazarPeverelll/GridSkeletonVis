@@ -887,30 +887,45 @@ class OriginDVITrainer(SingleVisTrainer):
             json.dump(evaluation, f)
 
 class DVIALMODITrainer(SingleVisTrainer):
-    def __init__(self, grid_high_mask, high_bom, iteration, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE):
-        super().__init__(grid_high_mask, high_bom, iteration, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE)
+    def __init__(self, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE, grid_high_mask, high_bom, iteration, data_provider,**kwargs):
+        super().__init__(model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE, **kwargs)
         self.is_first_active_learning = True  # Add this line
+        self.grid_high_mask = grid_high_mask
+        self.high_bom = high_bom
+        self.iteration = iteration
+        self.data_provider = data_provider
         
 
-    def evaluate_loss(self, current_loader):
+    def al_loader(self):
         print("evluating")
         # This method calculates the loss of each sample in the dataset.
         # It returns a list of losses and updates the edge loader with the inverse of these losses as weights.
         losses = []
         
+        # Ensure the model is in evaluation mode
+        self.model.eval()
+
         grid_pred = self.data_provider.get_pred(self.iteration, self.grid_high_mask).argmax(axis=1)
-        grid_second_emd_mask = self.projector.batch_project(self.iteration, self.grid_high_mask)
-        grid_second_high_mask = self.projector.batch_inverse(self.iteration, grid_second_emd_mask)
+        grid_second_high_mask = self.model(self.grid_high_mask)
         grid_second_pred = self.data_provider.get_pred(self.iteration, grid_second_high_mask).argmax(axis=1)
 
         error_indices = [i for i in range(len(grid_pred)) if grid_pred[i] != grid_second_pred[i]]
         grid_high_error = [self.grid_high_mask[i] for i in error_indices]
 
-        
-        # Ensure the model is in evaluation mode
-        self.model.eval()
+        distances = np.linalg.norm(grid_high_error - self.high_bom, axis=1)
+
+        threshold = 0.5
+
+        closest_center_idx = np.argmin(distances)
+        if distances[closest_center_idx] <= threshold:
+            # 新点属于某个聚类
+            cluster_label = closest_center_idx
+        else:
+            # 新点不属于任何聚类
+            cluster_label = -1
+
         with torch.no_grad():
-            for data in current_loader:
+            for data in self.edge_loader:
                 edge_to, edge_from, a_to, a_from = data
                 edge_to = edge_to.to(device=self.DEVICE, dtype=torch.float32)
                 edge_from = edge_from.to(device=self.DEVICE, dtype=torch.float32)
@@ -933,10 +948,10 @@ class DVIALMODITrainer(SingleVisTrainer):
         # n_samples = int(np.sum(5 * weights) // 1)
         # chose sampler based on the number of dataset
         if len(edge_to) > pow(2,24):
-            sampler = CustomWeightedRandomSampler(weights, len(current_loader.dataset), replacement=True)
+            sampler = CustomWeightedRandomSampler(weights, len(self.edge_loader.dataset), replacement=True)
         else:
-            sampler = WeightedRandomSampler(weights, len(current_loader.dataset), replacement=True)
-        new_loader = DataLoader(current_loader.dataset, batch_size=2000, sampler=sampler, num_workers=8, prefetch_factor=10)
+            sampler = WeightedRandomSampler(weights, len(self.edge_loader.dataset), replacement=True)
+        new_loader = DataLoader(self.edge_loader.dataset, batch_size=2000, sampler=sampler, num_workers=8, prefetch_factor=10)
         # new_loader = ActiveLearningEdgeLoader(current_loader.dataset, weights, batch_size=current_loader.batch_size)
         return losses, new_loader
     
@@ -986,7 +1001,7 @@ class DVIALMODITrainer(SingleVisTrainer):
         start_time = time.time()
 
         if is_active_learning and is_full_data == False:
-            _, current_loader = self.evaluate_loss(current_loader)
+            _, current_loader = self.al_loader()
             # Adjust learning rate for active learning
             if self.is_first_active_learning:
                 print("change learning rate")
@@ -1018,7 +1033,7 @@ class DVIALMODITrainer(SingleVisTrainer):
         patient = PATIENT
         time_start = time.time()
         # Pretraining
-        for epoch in range(10):
+        for epoch in range(1):
             print("Pretraining")
             _, _, current_loader= self.run_epoch(epoch, current_loader, is_active_learning=False,is_full_data=True)
 

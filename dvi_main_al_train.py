@@ -176,7 +176,7 @@ for iteration in range(EPOCH_START, EPOCH_END+EPOCH_PERIOD, EPOCH_PERIOD):
     ########################################################################################################################
 
     # trainer = OriginDVITrainer(model, criterion, optimizer, lr_scheduler, edge_loader=edge_loader, DEVICE=DEVICE)
-    trainer = DVIALMODITrainer(grid_high_mask, high_bom, iteration, model, criterion, optimizer, lr_scheduler, edge_loader=edge_loader, DEVICE=DEVICE)
+    trainer = DVIALMODITrainer(model, criterion, optimizer, lr_scheduler, edge_loader=edge_loader, DEVICE=DEVICE, grid_high_mask=grid_high_mask, high_bom=high_bom, iteration=iteration, data_provider=data_provider)
 
     t2=time.time()
     trainer.train(PATIENT, MAX_EPOCH)
