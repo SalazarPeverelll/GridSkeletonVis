@@ -33,12 +33,12 @@ VIS_METHOD = "DVI" # DeepVisualInsight
 #                                                     LOAD PARAMETERS                                                  #
 ########################################################################################################################
 parser = argparse.ArgumentParser(description='Process hyperparameters...')
-parser.add_argument('--content_path', type=str, default='/home/yiming/ContrastDebugger')
+parser.add_argument('--content_path', type=str, default='/home/yiming/ContrastDebugger/EXP/cifar10')
 args = parser.parse_args()
 
 CONTENT_PATH = args.content_path
 sys.path.append(CONTENT_PATH)
-with open(os.path.join(CONTENT_PATH, "config_dvi_trust.json"), "r") as f:
+with open(os.path.join(CONTENT_PATH, "config_dvi_modi.json"), "r") as f:
     config = json.load(f)
 # config = config[VIS_METHOD]
 
@@ -87,10 +87,10 @@ net = eval("subject_model.{}()".format(NET))
 ########################################################################################################################
 # Define data_provider
 data_provider = NormalDataProvider(CONTENT_PATH, net, EPOCH_START, EPOCH_END, EPOCH_PERIOD, device=DEVICE, classes=CLASSES, epoch_name='Epoch', verbose=1)
-# if PREPROCESS:
-#     data_provider._meta_data()
-#     if B_N_EPOCHS >0:
-#         data_provider._estimate_boundary(LEN//10, l_bound=L_BOUND)
+if PREPROCESS:
+    data_provider._meta_data()
+    if B_N_EPOCHS >0:
+        data_provider._estimate_boundary(LEN//10, l_bound=L_BOUND)
 
 # Define visualization models
 model = VisModel(ENCODER_DIMS, DECODER_DIMS)

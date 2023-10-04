@@ -130,7 +130,10 @@ class visualizer(VisualizerAbstractClass):
     
     def get_epoch_plot_measures(self, epoch):
         """get plot measure for visualization"""
-        data = self.data_provider.train_representation(epoch)
+        if self.data_provider.train_representation(epoch).ndim > 2:
+            data = self.data_provider.train_representation(epoch).reshape((60000, 512))
+        else:
+            data = self.data_provider.train_representation(epoch)
         
         embedded = self.projector.batch_project(epoch, data)
 
@@ -232,7 +235,10 @@ class visualizer(VisualizerAbstractClass):
         # desc = params_str % (self.resolution)
         # self.desc.set_text(desc)
 
-        train_data = self.data_provider.train_representation(epoch)
+        if self.data_provider.train_representation(epoch).ndim > 2:
+            train_data = self.data_provider.train_representation(epoch).reshape((60000, 512))
+        else:
+            train_data = self.data_provider.train_representation(epoch)
         train_labels = self.data_provider.train_labels(epoch)
         pred = self.data_provider.get_pred(epoch, train_data)
         pred = pred.argmax(axis=1)

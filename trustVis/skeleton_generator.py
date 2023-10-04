@@ -332,9 +332,12 @@ class CenterSkeletonGenerator:
     
     def center_skeleton_genertaion(self):
         # Initial centers
-        data = self.data_provider.train_representation(self.epoch)
-        centers_c, _, radii_c = self.gen_center(self.data_provider.train_representation(self.epoch),k=1)
-        centers_n, labels,radii_n = self.gen_center(self.data_provider.train_representation(self.epoch),k=10)
+        if self.data_provider.train_representation(self.epoch).ndim > 2:
+            data = self.data_provider.train_representation(self.epoch).reshape((60000, 512))
+        else:
+            data = self.data_provider.train_representation(self.epoch)
+        centers_c, _, radii_c = self.gen_center(data,k=1)
+        centers_n, labels,radii_n = self.gen_center(data,k=10)
         print("finished init")
 
         # Recursive clustering

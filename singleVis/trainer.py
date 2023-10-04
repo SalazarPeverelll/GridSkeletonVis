@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 import copy
 import numpy as np
 from singleVis.custom_weighted_random_sampler import CustomWeightedRandomSampler
+from singleVis.spatial_edge_constructor import ActiveLearningEpochSpatialEdgeConstructor
+from singleVis.edge_dataset import DVIDataHandler
 
 torch.manual_seed(0)  # 使用固定的种子
 torch.cuda.manual_seed_all(0)
@@ -887,13 +889,18 @@ class OriginDVITrainer(SingleVisTrainer):
             json.dump(evaluation, f)
 
 class DVIALMODITrainer(SingleVisTrainer):
-    def __init__(self, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE, grid_high_mask, high_bom, iteration, data_provider,**kwargs):
+    def __init__(self, model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE, grid_high_mask, high_bom, high_rad, iteration, data_provider, prev_model, S_N_EPOCHS, B_N_EPOCHS, N_NEIGHBORS, **kwargs):
         super().__init__(model, criterion, optimizer, lr_scheduler, edge_loader, DEVICE, **kwargs)
         self.is_first_active_learning = True  # Add this line
         self.grid_high_mask = grid_high_mask
         self.high_bom = high_bom
+        self.high_rad = high_rad
         self.iteration = iteration
         self.data_provider = data_provider
+        self.prev_model = prev_model
+        self.S_N_EPOCHS = S_N_EPOCHS
+        self.B_N_EPOCHS = B_N_EPOCHS
+        self.N_NEIGHBORS = N_NEIGHBORS
         
 
     def al_loader(self):
@@ -904,54 +911,71 @@ class DVIALMODITrainer(SingleVisTrainer):
         
         # Ensure the model is in evaluation mode
         self.model.eval()
+        # 检查grid_high_mask的类型
+        if isinstance(self.grid_high_mask, torch.Tensor):
+            # 将Tensor转换为ndarray
+            self.grid_high_mask = self.grid_high_mask.cpu().detach().numpy()
 
         grid_pred = self.data_provider.get_pred(self.iteration, self.grid_high_mask).argmax(axis=1)
-        grid_second_high_mask = self.model(self.grid_high_mask)
+        self.grid_high_mask = torch.tensor(self.grid_high_mask).to(device=self.DEVICE, dtype=torch.float32)
+        grid_second_high_mask = self.model(self.grid_high_mask,self.grid_high_mask)['recon'][0]
+        grid_second_high_mask = grid_second_high_mask.cpu().detach().numpy()
         grid_second_pred = self.data_provider.get_pred(self.iteration, grid_second_high_mask).argmax(axis=1)
 
         error_indices = [i for i in range(len(grid_pred)) if grid_pred[i] != grid_second_pred[i]]
         grid_high_error = [self.grid_high_mask[i] for i in error_indices]
 
-        distances = np.linalg.norm(grid_high_error - self.high_bom, axis=1)
+        # 获取阈值
+        threshold = self.high_rad[0] // 2
 
-        threshold = 0.5
+        # 筛选出半径小于阈值的点的索引
+        filtered_indices = np.where(self.high_rad < threshold)
 
-        closest_center_idx = np.argmin(distances)
-        if distances[closest_center_idx] <= threshold:
-            # 新点属于某个聚类
-            cluster_label = closest_center_idx
-        else:
-            # 新点不属于任何聚类
-            cluster_label = -1
+        # 根据索引获取对应位置的center
+        filtered_centers = self.high_bom[filtered_indices]
+        filtered_radius = self.high_rad[filtered_indices]
 
-        with torch.no_grad():
-            for data in self.edge_loader:
-                edge_to, edge_from, a_to, a_from = data
-                edge_to = edge_to.to(device=self.DEVICE, dtype=torch.float32)
-                edge_from = edge_from.to(device=self.DEVICE, dtype=torch.float32)
-                a_to = a_to.to(device=self.DEVICE, dtype=torch.float32)
-                a_from = a_from.to(device=self.DEVICE, dtype=torch.float32)
-                outputs = self.model(edge_to, edge_from)
-                _, _,_, loss = self.criterion(edge_to, edge_from, a_to, a_from, self.model, outputs)
-                losses.append(loss.mean().item())
-        # We use the inverse of the loss as the weight, so the samples with higher loss will have higher chance to be selected.
-        # weights = 1.0 / torch.tensor(losses, dtype=torch.float32)
-        weights = torch.tensor(losses, dtype=torch.float32)
-        # Normalize the weights so they sum to 1
-        weights = weights / weights.sum()
+        cluster_points = []
+        uncluster_points = []
 
-        # eliminate_zeros = weights>5e-2    #1e-3
-        # edge_to = edge_to[eliminate_zeros]
-        # edge_from = edge_from[eliminate_zeros]
-        # weights = weights[eliminate_zeros]
-        # Update the edge loader
-        # n_samples = int(np.sum(5 * weights) // 1)
+        # 遍历每个点
+        for point in grid_high_error:
+            point = point.cpu().detach().numpy()
+            # 计算点到所有center的距离
+            distances = np.linalg.norm(point - filtered_centers, axis=1)
+            
+            # 找到最近center的索引
+            closest_center_index = np.argmin(distances)
+            
+            # 判断最近center的距离是否小于对应center的半径
+            if distances[closest_center_index] < filtered_radius[closest_center_index]:
+                # 满足条件的点
+                cluster_points.append(point)
+            else:
+                # 不满足条件的点
+                uncluster_points.append(point)
+        cluster_points = np.array(cluster_points)
+        uncluster_points = np.array(uncluster_points)
+
+        al_spatial_cons = ActiveLearningEpochSpatialEdgeConstructor(self.data_provider, self.iteration, self.S_N_EPOCHS, self.B_N_EPOCHS, self.N_NEIGHBORS, cluster_points, uncluster_points)
+        al_edge_to, al_edge_from, al_probs, al_feature_vectors, al_attention = al_spatial_cons.construct()
+
+        al_probs = al_probs / (al_probs.max()+1e-3)
+        eliminate_zeros = al_probs>5e-2    #1e-3
+        al_edge_to = al_edge_to[eliminate_zeros]
+        al_edge_from = al_edge_from[eliminate_zeros]
+        al_probs = al_probs[eliminate_zeros]
+        
+        dataset = DVIDataHandler(al_edge_to, al_edge_from, al_feature_vectors, al_attention)
+
+        n_samples = int(np.sum(self.S_N_EPOCHS * al_probs) // 1)
+
         # chose sampler based on the number of dataset
-        if len(edge_to) > pow(2,24):
-            sampler = CustomWeightedRandomSampler(weights, len(self.edge_loader.dataset), replacement=True)
+        if len(al_edge_to) > pow(2,24):
+            sampler = CustomWeightedRandomSampler(al_probs, n_samples, replacement=True)
         else:
-            sampler = WeightedRandomSampler(weights, len(self.edge_loader.dataset), replacement=True)
-        new_loader = DataLoader(self.edge_loader.dataset, batch_size=2000, sampler=sampler, num_workers=8, prefetch_factor=10)
+            sampler = WeightedRandomSampler(al_probs, n_samples, replacement=True)
+        new_loader = DataLoader(dataset, batch_size=2000, sampler=sampler, num_workers=8, prefetch_factor=10)
         # new_loader = ActiveLearningEdgeLoader(current_loader.dataset, weights, batch_size=current_loader.batch_size)
         return losses, new_loader
     
@@ -1032,10 +1056,10 @@ class DVIALMODITrainer(SingleVisTrainer):
         print("ininin in dvi")
         patient = PATIENT
         time_start = time.time()
-        # Pretraining
-        for epoch in range(1):
-            print("Pretraining")
-            _, _, current_loader= self.run_epoch(epoch, current_loader, is_active_learning=False,is_full_data=True)
+        # # Pretraining
+        # for epoch in range(10):
+        #     print("Pretraining")
+        #     _, _, current_loader= self.run_epoch(epoch, current_loader, is_active_learning=False,is_full_data=True)
 
 
         for epoch in range(MAX_EPOCH_NUMS):
@@ -1055,6 +1079,11 @@ class DVIALMODITrainer(SingleVisTrainer):
         time_end = time.time()
         time_spend = time_end - time_start
         print("Time spend: {:.2f} for training vis model...".format(time_spend))   
+
+        self.prev_model.load_state_dict(self.model.state_dict())
+        for param in self.prev_model.parameters():
+            param.requires_grad = False
+        w_prev = dict(self.prev_model.named_parameters())
         
     
     def record_time(self, save_dir, file_name, operation, iteration, t):

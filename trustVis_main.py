@@ -19,7 +19,8 @@ from singleVis.losses import UmapLoss, ReconstructionLoss, TemporalLoss, DVILoss
 from singleVis.edge_dataset import DVIDataHandler
 from singleVis.trainer import DVITrainer,DVIALTrainer
 from singleVis.data import NormalDataProvider
-from singleVis.spatial_edge_constructor import SingleEpochSpatialEdgeConstructor
+# from singleVis.spatial_edge_constructor_sk import SingleEpochSpatialEdgeConstructor
+from singleVis.spatial_skeleton_edge_constructor import SingleEpochSpatialEdgeConstructor
 
 from singleVis.projector import DVIProjector
 from singleVis.utils import find_neighbor_preserving_rate
@@ -44,18 +45,13 @@ torch.backends.cudnn.benchmark = False
 
 
 parser = argparse.ArgumentParser(description='Process hyperparameters...')
-parser.add_argument('--content_path', type=str)
-parser.add_argument('--epoch', type=int)
-# parser.add_argument('--epoch_end', type=int)
-parser.add_argument('--epoch_period', type=int,default=1)
-parser.add_argument('--preprocess', type=int,default=0)
+parser.add_argument('--content_path', type=str, default='/home/yiming/ContrastDebugger/EXP/cifar10')
 args = parser.parse_args()
 
 CONTENT_PATH = args.content_path
 sys.path.append(CONTENT_PATH)
-with open(os.path.join(CONTENT_PATH, "config.json"), "r") as f:
+with open(os.path.join(CONTENT_PATH, "config_dvi_sk.json"), "r") as f:
     config = json.load(f)
-config = config[VIS_METHOD]
 
 # record output information
 # now = time.strftime("%Y-%m-%d-%H_%M_%S", time.localtime(time.time())) 
@@ -66,14 +62,14 @@ CLASSES = config["CLASSES"]
 DATASET = config["DATASET"]
 PREPROCESS = config["VISUALIZATION"]["PREPROCESS"]
 GPU_ID = config["GPU"]
-GPU_ID = 1
+# GPU_ID = 1
 EPOCH_START = config["EPOCH_START"]
 EPOCH_END = config["EPOCH_END"]
 EPOCH_PERIOD = config["EPOCH_PERIOD"]
 
-EPOCH_START = args.epoch
-EPOCH_END = args.epoch
-EPOCH_PERIOD = args.epoch_period
+# EPOCH_START = args.epoch
+# EPOCH_END = args.epoch
+# EPOCH_PERIOD = args.epoch_period
 
 # Training parameter (subject model)
 TRAINING_PARAMETER = config["TRAINING"]
@@ -107,11 +103,10 @@ net = eval("subject_model.{}()".format(NET))
 ########################################################################################################################
 # Define data_provider
 data_provider = NormalDataProvider(CONTENT_PATH, net, EPOCH_START, EPOCH_END, EPOCH_PERIOD, device=DEVICE, epoch_name='Epoch',classes=CLASSES,verbose=1)
-PREPROCESS = args.preprocess
 if PREPROCESS:
     data_provider._meta_data()
-    if B_N_EPOCHS >0:
-        data_provider._estimate_boundary(LEN // 10, l_bound=L_BOUND)
+#     if B_N_EPOCHS >0:
+#         data_provider._estimate_boundary(LEN // 10, l_bound=L_BOUND)
 
 # Define visualization models
 model = VisModel(ENCODER_DIMS, DECODER_DIMS)
@@ -155,9 +150,9 @@ for iteration in range(EPOCH_START, EPOCH_END+EPOCH_PERIOD, EPOCH_PERIOD):
     # high_bom2 = skeleton_generator.skeleton_gen()
     # high_bom = skeleton_generator.skeleton_gen_use_perturb()
     # high_bom = skeleton_generator.skeleton_gen_use_perturb(_epsilon=1e-3)
-    skeleton_generator = CenterSkeletonGenerator(data_provider,EPOCH_START,3,3,200)
+    skeleton_generator = CenterSkeletonGenerator(data_provider,EPOCH_START,3,3,100)
 
-    high_bom = skeleton_generator.center_skeleton_genertaion()
+    high_bom, high_rad = skeleton_generator.center_skeleton_genertaion()
     
     print("high_bom size",high_bom.shape)
     
